@@ -1,83 +1,118 @@
-name: RDP via Tailscale
+name: RDP via Tailscale - Auto Reconnect Edition
+
 on:
   workflow_dispatch:
 
 jobs:
   rdp:
     runs-on: windows-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 1️⃣ Aktifkan RDP dan firewall
-      - name: Enable Remote Desktop
+      # 1️⃣ Enable RDP + Optimasi Konfigurasi
+      - name: Enable Remote Desktop & Optimasi
         shell: pwsh
         run: |
-          Write-Host "🔧 Mengaktifkan RDP dan membuka firewall..."
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          Write-Host "🔧 Mengaktifkan RDP dan optimasi stabilitas..."
+          
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -Force
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          
+          # Disable NLA (penting untuk menghindari account restriction)
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0 -Force
+          
+          # Optimasi tambahan
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Name "fSingleSessionPerUser" -Value 0 -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Name "MaxDisconnectionTime" -Value 0 -Force
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDisableAutoReconnect" -Value 0 -Force
+          
           Restart-Service -Name TermService -Force
-          Write-Host "✅ Remote Desktop sudah aktif."
+          Write-Host "✅ RDP aktif dengan konfigurasi stabil."
 
-      # 2️⃣ Buat user dengan password aman (≤14 karakter, ASCII khusus dihindari)
+      # 2️⃣ Buat User Admin
       - name: Create Local Admin User
         id: user
         shell: pwsh
         run: |
-          $password = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 12 | ForEach-Object {[char]$_})
+          $password = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 14 | ForEach-Object {[char]$_})
           net user RDP $password /add /Y
           net localgroup administrators RDP /add
           Add-Content $env:GITHUB_ENV "RDP_PASSWORD=$password"
           Write-Host "✅ User RDP dibuat: RDP / $password"
 
-      # 3️⃣ Instal Tailscale menggunakan EXE (hindari MSI error)
-      - name: Install Tailscale Client
+      # 3️⃣ Setup Tailscale dengan Auto-Reconnect Logic
+      - name: Setup Tailscale + Auto Reconnect
         shell: pwsh
         run: |
-          Write-Host "📦 Menginstal Tailscale..."
+          Write-Host "📦 Menginstal dan menghubungkan Tailscale..."
+          
+          # Install Tailscale (fallback jika action gagal)
           $exe = "$env:TEMP\tailscale-setup.exe"
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile $exe
           Start-Process $exe -ArgumentList "/quiet /norestart" -Wait
-          Write-Host "✅ Instalasi Tailscale selesai."
-
-      # 4️⃣ Hubungkan runner ke jaringan Tailscale
-      - name: Connect to Tailscale Network
-        shell: pwsh
-        run: |
+          
           $ts = "C:\Program Files\Tailscale\tailscale.exe"
-          $authkey = "${{ secrets.TS_AUTH_KEY }}"
-          if ([string]::IsNullOrEmpty($authkey)) {
-            Write-Host "⚠️ Auth Key tidak ditemukan! Jalankan login manual..."
-            & $ts up --hostname=gh-runner-${{ github.run_id }} --accept-dns=true --accept-routes=true
-          } else {
-            Write-Host "🔐 Menghubungkan node ke Tailnet..."
-            & $ts up --auth-key=$authkey --hostname=gh-runner-${{ github.run_id }} --accept-dns=true --accept-routes=true
+          
+          function Connect-Tailscale {
+            param([int]$maxRetries = 5)
+            for ($i = 1; $i -le $maxRetries; $i++) {
+              Write-Host "🔄 Percobaan koneksi ke Tailnet ($i/$maxRetries)..."
+              & $ts up --auth-key=${{ secrets.TS_AUTH_KEY }} --hostname=gh-runner-${{ github.run_id }} --accept-dns=true --accept-routes=true --reset
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "✅ Tailscale berhasil terhubung."
+                return $true
+              }
+              Write-Host "⚠️ Koneksi gagal, mencoba lagi dalam 10 detik..."
+              Start-Sleep -Seconds 10
+            }
+            throw "❌ Gagal connect setelah $maxRetries percobaan."
           }
-          if ($LASTEXITCODE -ne 0) { throw "❌ Gagal connect ke Tailnet." }
-          Write-Host "✅ Node tersambung ke Tailnet."
+          
+          Connect-Tailscale
+          
+          # Simpan IP untuk display
+          $ip = & $ts ip -4
+          Add-Content $env:GITHUB_ENV "TAILSCALE_IP=$ip"
+          Write-Host "🌐 Tailscale IP: $ip"
 
-      # 5️⃣ Tampilkan IP Tailscale dan kredensial akses RDP
+      # 4️⃣ Tampilkan Informasi Akses
       - name: Display Access Information
         shell: pwsh
         run: |
-          $ts = "C:\Program Files\Tailscale\tailscale.exe"
-          $ip = & $ts ip -4
           Write-Host "`n==============================="
-          Write-Host "✅ Tailscale dan RDP Siap Digunakan"
-          Write-Host "🌐 IP Tailscale: $ip"
-          Write-Host "👤 Username: RDP"
-          Write-Host "🔑 Password: $env:RDP_PASSWORD"
-          Write-Host "Gunakan aplikasi mstsc.exe dengan IP di atas."
+          Write-Host "✅ RDP + Tailscale Siap Digunakan (Auto-Reconnect Active)"
+          Write-Host "🌐 Tailscale IP : $env:TAILSCALE_IP"
+          Write-Host "👤 Username     : RDP"
+          Write-Host "🔑 Password     : $env:RDP_PASSWORD"
+          Write-Host "🕒 Durasi maksimal: ~6 jam"
           Write-Host "==============================="
 
-      # 6️⃣ Jaga agar sesi tetap hidup selama 12 jam
-      - name: Keep Session Alive
+      # 5️⃣ Keep Session Alive + Auto-Reconnect Monitor
+      - name: Keep RDP Session Alive + Monitor Tailscale
         shell: pwsh
         run: |
-          Write-Host "🕒 Menjaga sesi RDP aktif selama 12 jam (720 menit)..."
-          for ($i=0; $i -lt 720; $i++) {
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Session RDP aktif..."
-            Start-Sleep -Seconds 60
+          Write-Host "🕒 Memulai sesi keep-alive + auto-reconnect monitor (6 jam)..."
+          $startTime = Get-Date
+          $ts = "C:\Program Files\Tailscale\tailscale.exe"
+          
+          while ((Get-Date) - $startTime).TotalMinutes -lt 355) {
+              $elapsed = [math]::Round(((Get-Date) - $startTime).TotalMinutes)
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Session aktif - $elapsed menit berjalan"
+              
+              # Cek status Tailscale & reconnect jika putus
+              $status = & $ts status --json | ConvertFrom-Json
+              if ($status.BackendState -ne "Running" -or -not $status.Self.Online) {
+                  Write-Host "⚠️ Tailscale terputus! Melakukan auto-reconnect..."
+                  & $ts up --auth-key=${{ secrets.TS_AUTH_KEY }} --hostname=gh-runner-${{ github.run_id }} --accept-dns=true --accept-routes=true --reset
+              }
+              
+              # Simulate user activity (anti-idle)
+              Add-Type -AssemblyName System.Windows.Forms
+              [System.Windows.Forms.SendKeys]::SendWait("{F15}")
+              
+              Start-Sleep -Seconds 45
           }
+          Write-Host "⏰ Waktu hampir habis. Workflow akan berakhir."
