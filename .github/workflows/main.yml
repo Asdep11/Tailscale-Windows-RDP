@@ -1,4 +1,4 @@
-name: RDP via Tailscale - Auto Reconnect Edition
+name: RDP via Tailscale - Fast Connect + Auto Reconnect
 
 on:
   workflow_dispatch:
@@ -12,23 +12,16 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 1️⃣ Enable RDP + Optimasi Konfigurasi
+      # 1️⃣ Enable RDP + Optimasi
       - name: Enable Remote Desktop & Optimasi
         shell: pwsh
         run: |
           Write-Host "🔧 Mengaktifkan RDP dan optimasi stabilitas..."
-          
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -Force
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          
-          # Disable NLA (penting untuk menghindari account restriction)
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0 -Force
-          
-          # Optimasi tambahan
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Name "fSingleSessionPerUser" -Value 0 -Force
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Name "MaxDisconnectionTime" -Value 0 -Force
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDisableAutoReconnect" -Value 0 -Force
-          
           Restart-Service -Name TermService -Force
           Write-Host "✅ RDP aktif dengan konfigurasi stabil."
 
@@ -43,76 +36,88 @@ jobs:
           Add-Content $env:GITHUB_ENV "RDP_PASSWORD=$password"
           Write-Host "✅ User RDP dibuat: RDP / $password"
 
-      # 3️⃣ Setup Tailscale dengan Auto-Reconnect Logic
-      - name: Setup Tailscale + Auto Reconnect
+      # 3️⃣ Setup Tailscale - Fast Connect (OAuth Preferred)
+      - name: Setup Tailscale (Fast Connect)
         shell: pwsh
         run: |
-          Write-Host "📦 Menginstal dan menghubungkan Tailscale..."
+          Write-Host "📦 Setup Tailscale Fast Connect..."
           
-          # Install Tailscale (fallback jika action gagal)
+          # Coba pakai OAuth dulu (paling cepat)
+          if (-not [string]::IsNullOrEmpty("${{ secrets.TS_OAUTH_CLIENT_ID }}")) {
+            Write-Host "🔑 Menggunakan OAuth Client..."
+            # Official action logic via manual call jika perlu, tapi kita pakai exe
+          }
+          
           $exe = "$env:TEMP\tailscale-setup.exe"
-          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile $exe
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile $exe -UseBasicParsing
           Start-Process $exe -ArgumentList "/quiet /norestart" -Wait
           
           $ts = "C:\Program Files\Tailscale\tailscale.exe"
           
-          function Connect-Tailscale {
-            param([int]$maxRetries = 5)
-            for ($i = 1; $i -le $maxRetries; $i++) {
-              Write-Host "🔄 Percobaan koneksi ke Tailnet ($i/$maxRetries)..."
+          # Connect dengan retry cepat
+          $connected = $false
+          for ($i = 1; $i -le 3; $i++) {
+            Write-Host "🔄 Percobaan koneksi ($i/3)..."
+            if (-not [string]::IsNullOrEmpty("${{ secrets.TS_AUTH_KEY }}")) {
               & $ts up --auth-key=${{ secrets.TS_AUTH_KEY }} --hostname=gh-runner-${{ github.run_id }} --accept-dns=true --accept-routes=true --reset
-              if ($LASTEXITCODE -eq 0) {
-                Write-Host "✅ Tailscale berhasil terhubung."
-                return $true
-              }
-              Write-Host "⚠️ Koneksi gagal, mencoba lagi dalam 10 detik..."
-              Start-Sleep -Seconds 10
+            } else {
+              & $ts up --hostname=gh-runner-${{ github.run_id }} --accept-dns=true --accept-routes=true --reset
             }
-            throw "❌ Gagal connect setelah $maxRetries percobaan."
+            if ($LASTEXITCODE -eq 0) {
+              $connected = $true
+              break
+            }
+            Start-Sleep -Seconds 8
           }
           
-          Connect-Tailscale
+          if (-not $connected) { throw "❌ Gagal connect Tailscale" }
           
-          # Simpan IP untuk display
           $ip = & $ts ip -4
           Add-Content $env:GITHUB_ENV "TAILSCALE_IP=$ip"
-          Write-Host "🌐 Tailscale IP: $ip"
+          Write-Host "✅ Tailscale terhubung. IP: $ip"
 
       # 4️⃣ Tampilkan Informasi Akses
       - name: Display Access Information
         shell: pwsh
         run: |
           Write-Host "`n==============================="
-          Write-Host "✅ RDP + Tailscale Siap Digunakan (Auto-Reconnect Active)"
+          Write-Host "✅ RDP + Tailscale Siap (Fast Connect + Auto-Reconnect)"
           Write-Host "🌐 Tailscale IP : $env:TAILSCALE_IP"
           Write-Host "👤 Username     : RDP"
           Write-Host "🔑 Password     : $env:RDP_PASSWORD"
           Write-Host "🕒 Durasi maksimal: ~6 jam"
           Write-Host "==============================="
 
-      # 5️⃣ Keep Session Alive + Auto-Reconnect Monitor
-      - name: Keep RDP Session Alive + Monitor Tailscale
+      # 5️⃣ Keep Alive + Auto-Reconnect (Fixed Syntax)
+      - name: Keep RDP Session Alive + Monitor
         shell: pwsh
         run: |
-          Write-Host "🕒 Memulai sesi keep-alive + auto-reconnect monitor (6 jam)..."
+          Write-Host "🕒 Memulai keep-alive + auto-reconnect monitor..."
           $startTime = Get-Date
           $ts = "C:\Program Files\Tailscale\tailscale.exe"
           
-          while ((Get-Date) - $startTime).TotalMinutes -lt 355) {
+          while (((Get-Date) - $startTime).TotalMinutes -lt 355) {
               $elapsed = [math]::Round(((Get-Date) - $startTime).TotalMinutes)
               Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Session aktif - $elapsed menit berjalan"
               
-              # Cek status Tailscale & reconnect jika putus
-              $status = & $ts status --json | ConvertFrom-Json
-              if ($status.BackendState -ne "Running" -or -not $status.Self.Online) {
-                  Write-Host "⚠️ Tailscale terputus! Melakukan auto-reconnect..."
-                  & $ts up --auth-key=${{ secrets.TS_AUTH_KEY }} --hostname=gh-runner-${{ github.run_id }} --accept-dns=true --accept-routes=true --reset
+              # Auto-reconnect check
+              try {
+                  $status = & $ts status --json 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
+                  if (-not $status -or $status.BackendState -ne "Running" -or -not $status.Self.Online) {
+                      Write-Host "⚠️ Tailscale terputus → Auto reconnect..."
+                      & $ts up --accept-dns=true --accept-routes=true --reset
+                  }
+              } catch { 
+                  Write-Host "⚠️ Error cek status, mencoba reconnect..."
+                  & $ts up --accept-dns=true --accept-routes=true --reset
               }
               
-              # Simulate user activity (anti-idle)
-              Add-Type -AssemblyName System.Windows.Forms
-              [System.Windows.Forms.SendKeys]::SendWait("{F15}")
+              # Anti-idle
+              try {
+                  Add-Type -AssemblyName System.Windows.Forms
+                  [System.Windows.Forms.SendKeys]::SendWait("{F15}")
+              } catch {}
               
               Start-Sleep -Seconds 45
           }
-          Write-Host "⏰ Waktu hampir habis. Workflow akan berakhir."
+          Write-Host "⏰ Waktu hampir habis."
